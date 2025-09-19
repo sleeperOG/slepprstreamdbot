@@ -133,20 +133,29 @@ async def get_audio_info(query: str, bitrate_mode: str = "default", exclude_url:
 
 # ─── Playback & Auto-Feed ─────────────────────────────────────────────────────
 def normalise_title(title: str) -> str:
-    # Lowercase, remove punctuation, collapse spaces, strip common tags
     title = title.lower()
     title = re.sub(r'\[.*?\]|\(.*?\)', '', title)  # remove bracketed text
     title = re.sub(r'[^a-z0-9\s]', '', title)      # remove punctuation
     title = re.sub(r'\s+', ' ', title)             # collapse spaces
     return title.strip()
 
+def is_duplicate(candidate: dict, history: list) -> bool:
+    cand_title = normalise_title(candidate.get("title", ""))
+    cand_dur = candidate.get("duration")
+    for song in history:
+        hist_title = normalise_title(song.get("title", ""))
+        hist_dur = song.get("duration")
+        if cand_title == hist_title:
+            return True
+        if cand_dur and hist_dur and abs(cand_dur - hist_dur) <= 3:
+            return True
+    return False
+
 async def auto_feed(interaction: discord.Interaction, song_info: dict):
     state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
 
     try:
-        exclude_titles = {normalise_title(s["title"]) for s in state.history}
-
         candidates = await get_audio_info(
             query,
             state.bitrate_mode,
@@ -159,7 +168,7 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
 
         rec = None
         for c in candidates:
-            if normalise_title(c["title"]) not in exclude_titles:
+            if not is_duplicate(c, state.history):
                 rec = c
                 break
 
@@ -435,8 +444,41 @@ async def leave(interaction: discord.Interaction):
                                                                                            # Silently acknowledge without sending a message
         await interaction.response.defer(ephemeral=True)
 
-@bot.tree.command(name="play", description="Play a song by search or link")
-@app_commands.describe(query="Search terms or YouTube URL")
+SPOTIFY_TRACK_RE = re.compile(r"(?:https?://)?open\.spotify\.com/track/([a-zA-Z0-9]+)")
+SPOTIFY_PLAYLIST_RE = re.compile(r"(?:https?://)?open\.spotify\.com/playlist/([a-zA-Z0-9]+)")
+SPOTIFY_ALBUM_RE = re.compile(r"(?:https?://)?open\.spotify\.com/album/([a-zA-Z0-9]+)")
+
+async def resolve_spotify_to_search(query: str) -> list[str]:
+    """
+    Takes a Spotify track/playlist/album URL and returns one or more YouTube search terms.
+    """
+    import yt_dlp
+    ydl_opts = {"quiet": True, "extract_flat": True}
+
+    def _extract():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(query, download=False)
+
+    info = await asyncio.to_thread(_extract)
+
+    search_terms = []
+    if info.get("_type") == "playlist" and "entries" in info:
+        for entry in info["entries"]:
+            artist = entry.get("artist") or ""
+            title = entry.get("title") or ""
+            if artist or title:
+                search_terms.append(f"{artist} {title}".strip())
+    else:
+        artist = info.get("artist") or ""
+        title = info.get("title") or ""
+        if artist or title:
+            search_terms.append(f"{artist} {title}".strip())
+
+    return search_terms
+
+
+@bot.tree.command(name="play", description="Play a song by search, YouTube, or Spotify URL")
+@app_commands.describe(query="Search terms, YouTube URL, or Spotify URL")
 async def play(interaction: discord.Interaction, query: str):
     state = get_state(interaction.guild.id)
     vc = interaction.guild.voice_client
@@ -446,14 +488,34 @@ async def play(interaction: discord.Interaction, query: str):
             ephemeral=True
         )
 
-    # Defer the response as ephemeral so the whole flow stays private
     await interaction.response.defer(ephemeral=True)
+
+    # Detect Spotify URL
+    if SPOTIFY_TRACK_RE.search(query) or SPOTIFY_PLAYLIST_RE.search(query) or SPOTIFY_ALBUM_RE.search(query):
+        search_terms = await resolve_spotify_to_search(query)
+        if not search_terms:
+            return await interaction.followup.send("Could not resolve Spotify link.", ephemeral=True)
+
+        # Playlist or album → queue all tracks
+        if len(search_terms) > 1:
+            for term in search_terms:
+                track_info = await get_audio_info(term, state.bitrate_mode)
+                track_info["search_query"] = term
+                track_info["url_fetched_at"] = time.time()
+                state.queue.append(track_info)
+            await interaction.followup.send(f"Queued {len(search_terms)} tracks from Spotify.", ephemeral=True)
+            if not vc.is_playing():
+                await play_next(interaction)
+            return
+
+        # Single track → replace query with resolved search term
+        query = search_terms[0]
+
     try:
         info = await get_audio_info(query, state.bitrate_mode)
-        info["search_query"] = query  # store the original search query for URL refresh
+        info["search_query"] = query
         info["url_fetched_at"] = time.time()
 
-        # Debug log for tracking when the URL was fetched
         logging.info(f"[/play] URL fetched for: {info['title']} at {info['url_fetched_at']}")
 
         embed = discord.Embed(
@@ -465,7 +527,6 @@ async def play(interaction: discord.Interaction, query: str):
             embed.set_thumbnail(url=info["thumbnail"])
         embed.set_footer(text="Click to confirm or cancel.")
 
-        # Send the confirmation prompt as ephemeral
         await interaction.followup.send(
             embed=embed,
             view=ConfirmView(info, interaction),
@@ -534,7 +595,7 @@ async def bitrate(interaction: discord.Interaction, mode: str = None):
     await interaction.response.send_message(msg, ephemeral=True)
 
 # ─── Music Control Commands ────────────────────────────────────────────────
-"""
+
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
@@ -598,7 +659,6 @@ async def loop(interaction: discord.Interaction, mode: str):
     state = get_state(interaction.guild.id)
     state.loop_mode = mode
     await interaction.response.send_message(f"Loop mode set to `{mode}`.", ephemeral=True)
-"""
 
 # ─── Startup & Command Sync ───────────────────────────────────────────────────
 @bot.event
