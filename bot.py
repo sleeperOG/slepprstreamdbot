@@ -3,6 +3,7 @@ import sys
 import logging
 import asyncio
 import time
+import re
 
 import discord
 from discord import app_commands
@@ -131,12 +132,20 @@ async def get_audio_info(query: str, bitrate_mode: str = "default", exclude_url:
     }
 
 # ─── Playback & Auto-Feed ─────────────────────────────────────────────────────
+def normalise_title(title: str) -> str:
+    # Lowercase, remove punctuation, collapse spaces, strip common tags
+    title = title.lower()
+    title = re.sub(r'\[.*?\]|\(.*?\)', '', title)  # remove bracketed text
+    title = re.sub(r'[^a-z0-9\s]', '', title)      # remove punctuation
+    title = re.sub(r'\s+', ' ', title)             # collapse spaces
+    return title.strip()
+
 async def auto_feed(interaction: discord.Interaction, song_info: dict):
     state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
 
     try:
-        exclude_titles = {s["title"].lower() for s in state.history}
+        exclude_titles = {normalise_title(s["title"]) for s in state.history}
 
         candidates = await get_audio_info(
             query,
@@ -150,7 +159,7 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
 
         rec = None
         for c in candidates:
-            if c["title"].lower() not in exclude_titles:
+            if normalise_title(c["title"]) not in exclude_titles:
                 rec = c
                 break
 
