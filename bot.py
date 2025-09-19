@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import asyncio
+import time
 
 import discord
 from discord import app_commands
@@ -113,6 +114,7 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
     try:
         rec = await get_audio_info(query, state.bitrate_mode, exclude_url=song_info["url"])
         rec["search_query"] = query  # store the query for later refresh
+        rec["url_fetched_at"] = time.time()  # store fetch time to skip unnecessary refresh
         state.queue.append(rec)
 
         embed = discord.Embed(
@@ -130,6 +132,8 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
     except Exception as e:
         logging.error(f"Auto-feed error: {e}")
         await interaction.channel.send(f"Feed error: {e}")
+
+import time
 
 async def play_next(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
@@ -152,14 +156,25 @@ async def play_next(interaction: discord.Interaction):
     song = state.queue.pop(0)
     state.history.append(song)
 
-    # Refresh the URL before playback to avoid expiration
-    try:
-        search_term = song.get("search_query", song["title"])
-        refreshed_info = await get_audio_info(search_term, state.bitrate_mode)
-        song["url"] = refreshed_info["url"]
-    except Exception as e:
-        logging.error(f"Failed to refresh stream URL: {e}")
-        return await interaction.channel.send(f"Error refreshing stream for {song['title']}.")
+    # Decide if we need to refresh
+    needs_refresh = (
+        not song.get("url") or
+        not song.get("url_fetched_at") or
+        (time.time() - song["url_fetched_at"] > 900)  # 15 min
+    )
+
+    if needs_refresh:
+        logging.info(f"[play_next] Refreshing URL for: {song['title']}")
+        try:
+            search_term = song.get("search_query", song["title"])
+            refreshed_info = await get_audio_info(search_term, state.bitrate_mode)
+            song["url"] = refreshed_info["url"]
+            song["url_fetched_at"] = time.time()
+        except Exception as e:
+            logging.error(f"Failed to refresh stream URL: {e}")
+            return await interaction.channel.send(f"Error refreshing stream for {song['title']}.")
+    else:
+        logging.info(f"[play_next] Using cached URL for: {song['title']} (age: {round(time.time() - song['url_fetched_at'], 1)}s)")
 
     # Use from_probe with reconnect options for stability
     source = await discord.FFmpegOpusAudio.from_probe(
@@ -208,6 +223,10 @@ class ConfirmView(View):
         state = get_state(self.interaction.guild.id)
         state.queue.append(self.info)
 
+        # Debug log for when the song is officially queued
+        logging.info(f"[confirm] Added to queue: {self.info['title']} "
+                     f"(search_query='{self.info.get('search_query')}')")
+
         vc = self.interaction.guild.voice_client
         if vc and not vc.is_playing():
             await play_next(self.interaction)
@@ -228,6 +247,10 @@ class ConfirmView(View):
 
         await interaction.response.defer(ephemeral=True)
 
+        # Debug log for when playback is cancelled
+        logging.info(f"[confirm] Playback cancelled for: {self.info['title']} "
+                     f"(search_query='{self.info.get('search_query')}')")
+
         await interaction.edit_original_response(
             embed=None,
             content="Playback cancelled.",
@@ -236,10 +259,31 @@ class ConfirmView(View):
         self.stop()
 
 # ─── Slash Commands ──────────────────────────────────────────────────────────
-@bot.tree.command(name="status", description="Check bot voice status")
+@bot.tree.command(name="status", description="Check bot voice status and queue age")
 async def status(interaction: discord.Interaction):
+    state = get_state(interaction.guild.id)
     vc = interaction.guild.voice_client
-    msg = f"Connected to {vc.channel.name}" if vc and vc.is_connected() else "Not connected."
+
+    if vc and vc.is_connected():
+        msg = f"Connected to **{vc.channel.name}**"
+        if hasattr(vc.channel, "bitrate"):
+            msg += f" — Channel bitrate: {round(vc.channel.bitrate / 1000, 1)} kbps"
+    else:
+        msg = "Not connected to a voice channel."
+
+    # Show queue with age info
+    if state.queue:
+        msg += "\n\n**Queue:**"
+        now = time.time()
+        for idx, song in enumerate(state.queue, start=1):
+            age = None
+            if song.get("url_fetched_at"):
+                age = round(now - song["url_fetched_at"], 1)
+            age_str = f"{age}s old" if age is not None else "no timestamp"
+            msg += f"\n`{idx}.` {song['title']} — {age_str}"
+    else:
+        msg += "\n\nQueue is empty."
+
     await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="join", description="Join your voice channel")
@@ -284,6 +328,10 @@ async def play(interaction: discord.Interaction, query: str):
     try:
         info = await get_audio_info(query, state.bitrate_mode)
         info["search_query"] = query  # store the original search query for URL refresh
+        info["url_fetched_at"] = time.time()
+
+        # Debug log for tracking when the URL was fetched
+        logging.info(f"[/play] URL fetched for: {info['title']} at {info['url_fetched_at']}")
 
         embed = discord.Embed(
             title="Confirm Playback",
@@ -311,16 +359,56 @@ async def autoqueue(interaction: discord.Interaction):
     status = "enabled" if state.autoqueue_enabled else "disabled"
     await interaction.response.send_message(f"Auto-queue {status}.", ephemeral=True)
 
-@bot.tree.command(name="bitrate", description="Set audio bitrate mode")
-@app_commands.describe(mode="Which bitrate to use")
+@bot.tree.command(name="bitrate", description="Set or view audio bitrate modes")
+@app_commands.describe(mode="Which bitrate to use (leave empty to view all modes)")
 @app_commands.choices(mode=[
     Choice(name="default", value="default"),
     Choice(name="low", value="low")
 ])
-async def bitrate(interaction: discord.Interaction, mode: str):
+async def bitrate(interaction: discord.Interaction, mode: str = None):
+    # Map modes to approximate audio specs
+    bitrate_map = {
+        "default": {"kbps": 160, "khz": 48, "bits": 16},
+        "low": {"kbps": 96, "khz": 48, "bits": 16}
+    }
+
+    # Get actual Discord voice channel bitrate (bps → kbps)
+    vc = interaction.guild.voice_client
+    actual_bitrate_kbps = None
+    if vc and vc.channel and hasattr(vc.channel, "bitrate"):
+        actual_bitrate_kbps = round(vc.channel.bitrate / 1000, 1)
+
+    # If no mode provided, list all available modes
+    if mode is None:
+        msg = "**Available bitrate modes:**\n"
+        for m, specs in bitrate_map.items():
+            msg += f"• `{m}` → {specs['kbps']} kbps (~{specs['khz']} kHz / {specs['bits']}-bit PCM)\n"
+        if actual_bitrate_kbps:
+            msg += f"\n**Channel bitrate limit:** {actual_bitrate_kbps} kbps"
+        return await interaction.response.send_message(msg, ephemeral=True)
+
+    # Set the mode
     state = get_state(interaction.guild.id)
     state.bitrate_mode = mode
-    await interaction.response.send_message(f"Bitrate set to `{mode}`.", ephemeral=True)
+    specs = bitrate_map.get(mode, {"kbps": "?", "khz": "?", "bits": "?"})
+    kbps = specs["kbps"]
+    khz = specs["khz"]
+    bits = specs["bits"]
+
+    # Build the response
+    msg = (
+        f"Bitrate mode set to `{mode}`.\n"
+        f"**Approximate audio quality:** {kbps} kbps (~{khz} kHz / {bits}-bit PCM equivalent)"
+    )
+
+    if actual_bitrate_kbps:
+        msg += f"\n**Channel bitrate limit:** {actual_bitrate_kbps} kbps"
+        if kbps > actual_bitrate_kbps:
+            msg += " (Your setting is higher than the channel's cap — audio will be limited)"
+        elif kbps < actual_bitrate_kbps:
+            msg += " (Your setting is below the channel's max — no quality loss from Discord cap)"
+
+    await interaction.response.send_message(msg, ephemeral=True)
 
 # ─── Startup & Command Sync ───────────────────────────────────────────────────
 @bot.event
