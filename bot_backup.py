@@ -3,14 +3,6 @@ import yt_dlp
 import asyncio
 import os
 from discord import Option
-from dotenv import load_dotenv
-
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
-print(f"Loaded DISCORD_TOKEN ({len(TOKEN)} chars): {TOKEN!r}")
-if not TOKEN:
-    print("Error; DISCORD_TOKEN missing in .env")
-    exit(1)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -248,4 +240,4 @@ async def on_ready():
     print("Slash commands synced")
 
 print("Starting Sleppstream...")
-bot.run(TOKEN)
+bot.run(os.getenv("DISCORD_TOKEN"))
