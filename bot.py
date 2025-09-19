@@ -1,251 +1,334 @@
-import discord
-import yt_dlp
-import asyncio
 import os
-from discord import Option
-from dotenv import load_dotenv
+import sys
+import logging
+import asyncio
 
+import discord
+from discord import app_commands
+from discord.app_commands import Choice
+from discord.ext import commands
+from discord.ui import View, Button
+from dotenv import load_dotenv
+import yt_dlp
+
+# ─── Logging Configuration ─────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# ─── Environment & Token ───────────────────────────────────────────────────────
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-print(f"Loaded DISCORD_TOKEN ({len(TOKEN)} chars): {TOKEN!r}")
+masked = TOKEN[:6] + "…" + TOKEN[-6:] if TOKEN else "None"
+logging.info(f"TOKEN loaded: {masked}")
 if not TOKEN:
-    print("Error; DISCORD_TOKEN missing in .env")
-    exit(1)
+    logging.critical("DISCORD_TOKEN missing in .env")
+    sys.exit(1)
 
+# ─── Bot & Intents ─────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-bot = discord.Bot(intents=intents)
 
-pending_tracks = {}
-queue = []
-history = []
-loop_mode = "off"
-bitrate_mode = "default"
-autoqueue_enabled = False
-now_playing_message = None
-autoqueue_message = None
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-def generate_feed_query(info):
-    base = info['artist'] or ""
-    genre = info['genre'][0] if info['genre'] else ""
-    title_keywords = " ".join(info['title'].split()[:3])
-    return f"{base} {genre} similar {title_keywords}".strip()
+# ─── Constants ────────────────────────────────────────────────────────────────
+FFMPEG_OPTIONS = {"options": "-vn"}
 
-def get_audio_info(query):
-    global bitrate_mode
-    format_filter = 'bestaudio'
-    if bitrate_mode == "low":
-        format_filter = 'bestaudio[ext=webm][abr<=160]'
+# ─── Per-Guild State Management ───────────────────────────────────────────────
+class GuildState:
+    def __init__(self):
+        self.queue = []
+        self.history = []
+        self.loop_mode = "off"
+        self.bitrate_mode = "default"
+        self.autoqueue_enabled = False
+        self.now_playing_message = None
+        self.autoqueue_message = None
 
-    ydl_opts = {
-        'format': format_filter,
-        'quiet': True,
-        'default_search': 'ytsearch',
-        'noplaylist': True
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        entry = info['entries'][0] if 'entries' in info else info
-        return {
-            'url': entry['url'],
-            'title': entry['title'],
-            'thumbnail': entry.get('thumbnail'),
-            'artist': entry.get('uploader'),
-            'genre': entry.get('categories', []),
-            'views': entry.get('view_count', 0)
+guild_states: dict[int, GuildState] = {}
+
+def get_state(guild_id: int) -> GuildState:
+    if guild_id not in guild_states:
+        guild_states[guild_id] = GuildState()
+    return guild_states[guild_id]
+
+# ─── Utilities: YT-DLP & Feed Query ─────────────────────────────────────────────
+def generate_feed_query(info: dict) -> str:
+    # Remove common noise words from title
+    title = info.get("title", "")
+    noise_words = ["official", "video", "lyrics", "audio", "hd", "hq", "mv"]
+    filtered_title = " ".join(
+        [w for w in title.split() if w.lower() not in noise_words]
+    )
+
+    artist = info.get("artist") or ""
+    genres = " ".join(info.get("genre", []))
+    return f"{artist} {genres} related {filtered_title} audio".strip()
+
+async def get_audio_info(query: str, bitrate_mode: str, exclude_url: str = None) -> dict:
+    def extract():
+        fmt = "bestaudio"
+        if bitrate_mode == "low":
+            fmt = "bestaudio[ext=webm][abr<=160]"
+        opts = {
+            "format": fmt,
+            "quiet": True,
+            "default_search": "ytsearch10",  # get top 10 results
+            "noplaylist": True
         }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            entries = info["entries"] if "entries" in info else [info]
 
-async def auto_feed(ctx, song_info):
-    global autoqueue_message
+            # Filter out unwanted results
+            filtered = [
+                e for e in entries
+                if (exclude_url is None or e.get("url") != exclude_url)
+                and 90 <= e.get("duration", 0) <= 900
+            ]
+            if not filtered:
+                raise ValueError("No suitable results found.")
+
+            entry = filtered[0]
+            return {
+                "url": entry["url"],
+                "title": entry["title"],
+                "thumbnail": entry.get("thumbnail"),
+                "artist": entry.get("uploader"),
+                "genre": entry.get("categories", []),
+                "views": entry.get("view_count", 0),
+                "duration": entry.get("duration", 0)
+            }
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, extract)
+
+# ─── Playback & Auto-Feed ─────────────────────────────────────────────────────
+async def auto_feed(interaction: discord.Interaction, song_info: dict):
+    state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
     try:
-        recommended = get_audio_info(query)
-        queue.append(recommended)
+        rec = await get_audio_info(query, state.bitrate_mode, exclude_url=song_info["url"])
+        state.queue.append(rec)
 
         embed = discord.Embed(
             title="Auto-Queued",
-            description=f"{recommended['title']}\n*(based on {song_info['title']})*",
+            description=f"{rec['title']}\n*(based on {song_info['title']})*",
             color=0x1DB954
         )
-        if recommended['thumbnail']:
-            embed.set_thumbnail(url=recommended['thumbnail'])
+        if rec["thumbnail"]:
+            embed.set_thumbnail(url=rec["thumbnail"])
 
-        if autoqueue_message:
-            await autoqueue_message.edit(embed=embed)
+        if state.autoqueue_message:
+            await state.autoqueue_message.edit(embed=embed)
         else:
-            autoqueue_message = await ctx.respond(embed=embed)
+            state.autoqueue_message = await interaction.channel.send(embed=embed)
     except Exception as e:
-        await ctx.respond(f"Feed error: {str(e)}")
+        logging.error(f"Auto-feed error: {e}")
+        await interaction.channel.send(f"Feed error: {e}")
 
-async def play_next(ctx):
-    voice_client = ctx.guild.voice_client
-    if not voice_client or not voice_client.is_connected():
-        await ctx.respond("⚠️ I'm not connected to a voice channel.")
-        return
+async def play_next(interaction: discord.Interaction):
+    state = get_state(interaction.guild.id)
+    vc = interaction.guild.voice_client
 
-    if voice_client.is_playing():
-        voice_client.stop()
+    if not vc or not vc.is_connected():
+        return await interaction.channel.send("Not connected to a voice channel.")
 
-    try:
-        source = discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_options)
-        voice_client.play(
-            source,
-            after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
-        )
-    except Exception as e:
-        await ctx.respond(f"⚠️ Playback error: {str(e)}")
-        return
+    if vc.is_playing() or vc.is_paused():
+        vc.stop()
 
-class PlaybackControls(discord.ui.View):
-    def __init__(self, ctx):
-        super().__init__()
-        self.ctx = ctx
+    # If queue is empty, try auto‑queue before giving up
+    if not state.queue:
+        if state.autoqueue_enabled and state.history:
+            await auto_feed(interaction, state.history[-1])
+        if not state.queue:
+            return await interaction.channel.send("Queue is empty.")
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.grey)
-    async def rewind(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if history:
-            last_song = history[-1]
-            source = discord.FFmpegPCMAudio(last_song['url'], options='-vn')
-            self.ctx.guild.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(self.ctx), bot.loop))
-            await asyncio.sleep(1)
-            await interaction.response.send_message(f"Replaying: {last_song['title']}", ephemeral=True)
+    # Pop the next song
+    song = state.queue.pop(0)
+    state.history.append(song)
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.grey)
-    async def skip(self, button: discord.ui.Button, interaction: discord.Interaction):
-        self.ctx.guild.voice_client.stop()
-        await interaction.response.send_message("Skipped to next track ⏭️", ephemeral=True)
+    source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.grey)
-    async def toggle_loop(self, button: discord.ui.Button, interaction: discord.Interaction):
-        global loop_mode
-        loop_mode = "one" if loop_mode == "off" else "off"
-        await interaction.response.send_message(f"Loop mode: {loop_mode}", ephemeral=True)
+    def _after_play(err):
+        coro = play_next(interaction)
+        asyncio.run_coroutine_threadsafe(coro, bot.loop)
 
-@bot.slash_command(description="Check bot voice status")
-async def status(ctx):
-    vc = ctx.guild.voice_client
-    if vc and vc.is_connected():
-        await ctx.respond(f"Connected to: {vc.channel.name}")
+    vc.play(source, after=_after_play)
+
+    # Now playing embed
+    embed = discord.Embed(title="Now Playing", description=song["title"], color=0x1DB954)
+    if song["thumbnail"]:
+        embed.set_thumbnail(url=song["thumbnail"])
+
+    if state.now_playing_message:
+        await state.now_playing_message.edit(embed=embed)
     else:
-        await ctx.respond("Not connected to any voice channel.")
+        state.now_playing_message = await interaction.channel.send(embed=embed)
 
-@bot.slash_command(description="Force bot to leave and rejoin voice channel")
-async def fixvoice(ctx):
-    if ctx.guild.voice_client:
-        await ctx.guild.voice_client.disconnect()
-        await asyncio.sleep(1)
+    # Queue the next recommendation if auto‑queue is enabled
+    if state.autoqueue_enabled:
+        await auto_feed(interaction, song)
 
-    if ctx.author.voice:
-        try:
-            await ctx.author.voice.channel.connect()
-            await ctx.respond("Reconnected to your voice channel.")
-        except Exception as e:
-            await ctx.respond(f"Failed to reconnect: {str(e)}")
+    def _after_play(err):
+        coro = play_next(interaction)
+        asyncio.run_coroutine_threadsafe(coro, bot.loop)
+
+    vc.play(source, after=_after_play)
+
+    # Now playing embed
+    embed = discord.Embed(title="Now Playing", description=song["title"], color=0x1DB954)
+    if song["thumbnail"]:
+        embed.set_thumbnail(url=song["thumbnail"])
+
+    if state.now_playing_message:
+        await state.now_playing_message.edit(embed=embed)
     else:
-        await ctx.respond("You're not in a voice channel.")
+        state.now_playing_message = await interaction.channel.send(embed=embed)
 
-@bot.slash_command(description="Join your voice channel")
-async def join(ctx):
-    if ctx.author.voice:
-        channel = ctx.author.voice.channel
-        vc = ctx.guild.voice_client
+    # Queue the next recommendation if auto‑queue is enabled
+    if state.autoqueue_enabled:
+        await auto_feed(interaction, song)
 
-        if vc and vc.is_connected():
-            await ctx.respond("I'm already connected to a voice channel.")
-            return
-
-        try:
-            await channel.connect()
-            await ctx.respond("Joined your voice channel.")
-        except discord.ClientException as e:
-            await ctx.respond(f"Voice connection error: {str(e)}. Try `/leave` and then `/join` again.")
-        except IndexError:
-            await ctx.respond("Discord voice server returned invalid data. Try `/leave` and then `/join` again.")
-        except Exception as e:
-            await ctx.respond(f"Unexpected error: {str(e)}")
-    else:
-        await ctx.respond("You are not connected to a voice channel.")
-
-@bot.slash_command(description="Play a song by search or link")
-async def play(ctx, query: str):
-    voice_client = ctx.guild.voice_client
-    if not voice_client:
-        await ctx.respond("I am not connected to a voice channel.")
-        return
-
-    await ctx.respond(f"Searching for: {query}")
-
-    try:
-        info = get_audio_info(query)
-        pending_tracks[ctx.author.id] = info
-
-        embed = discord.Embed(title="Confirm Playback", description=info['title'], color=0x1DB954)
-        if info['thumbnail']:
-            embed.set_thumbnail(url=info['thumbnail'])
-        embed.set_footer(text="Click a button to confirm.")
-
-        view = ConfirmView(info, ctx)
-        await ctx.send(embed=embed, view=view)
-    except Exception as e:
-        await ctx.respond(f"Error: {str(e)}")
-
-class ConfirmView(discord.ui.View):
-    def __init__(self, info, ctx):
-        super().__init__()
+# ─── UI: Confirmation View ────────────────────────────────────────────────────
+class ConfirmView(View):
+    def __init__(self, info: dict, interaction: discord.Interaction):
+        super().__init__(timeout=60)
         self.info = info
-        self.ctx = ctx
+        self.interaction = interaction
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.green)
-    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if interaction.user != self.ctx.author:
-            await interaction.response.send_message("This isn't your confirmation.", ephemeral=True)
-            return
+    async def confirm(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.interaction.user.id:
+            return await interaction.response.send_message(
+                "Not your confirmation.",
+                ephemeral=True
+            )
 
-        queue.append(self.info)
-        await interaction.response.send_message(f"Added to queue: {self.info['title']} 🎶")
+        await interaction.response.defer(ephemeral=True)
 
-        if not history:
-            await interaction.followup.send("Want me to auto-queue similar tracks after each song? Type `/autoqueue` to enable.")
+        state = get_state(self.interaction.guild.id)
+        state.queue.append(self.info)
 
-        if not self.ctx.guild.voice_client.is_playing():
-            await play_next(self.ctx)
+        vc = self.interaction.guild.voice_client
+        if vc and not vc.is_playing():
+            await play_next(self.interaction)
 
-        new_embed = discord.Embed(title="Queued", description=self.info['title'], color=0x1DB954)
-        if self.info['thumbnail']:
-            new_embed.set_thumbnail(url=self.info['thumbnail'])
-        await interaction.message.edit(embed=new_embed, view=None)
+        await interaction.edit_original_response(
+            embed=None,
+            content="Added to queue.",
+            view=None
+        )
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.red)
-    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if interaction.user != self.ctx.author:
-            await interaction.response.send_message("This isn't your confirmation.", ephemeral=True)
-            return
+    async def cancel(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.interaction.user.id:
+            return await interaction.response.send_message(
+                "Not your confirmation.",
+                ephemeral=True
+            )
 
-        await interaction.response.send_message("Playback cancelled")
+        await interaction.response.defer(ephemeral=True)
 
-@bot.slash_command(description="Enable auto-queue based on listening history")
-async def autoqueue(ctx):
-    global autoqueue_enabled
-    autoqueue_enabled = True
-    await ctx.respond("Auto-queue enabled. I’ll keep adding similar tracks after each song.")
+        await interaction.edit_original_response(
+            embed=None,
+            content="Playback cancelled.",
+            view=None
+        )
+        self.stop()
 
-@bot.slash_command(description="Set audio bitrate mode")
-async def bitrate(ctx, mode: Option(str, choices=["default", "low"])):
-    global bitrate_mode
-    bitrate_mode = mode
-    await ctx.respond(f"Bitrate mode set to: `{bitrate_mode}`")
+# ─── Slash Commands ──────────────────────────────────────────────────────────
+@bot.tree.command(name="status", description="Check bot voice status")
+async def status(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    msg = f"Connected to {vc.channel.name}" if vc and vc.is_connected() else "Not connected."
+    await interaction.response.send_message(msg, ephemeral=True)
 
-@bot.slash_command(description="Leave the voice channel")
-async def leave(ctx):
-    await ctx.guild.voice_client.disconnect()
-    await ctx.respond("Left the voice channel.")
+@bot.tree.command(name="join", description="Join your voice channel")
+async def join(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        return await interaction.response.send_message("You need to be in a voice channel.", ephemeral=True)
 
+    channel = interaction.user.voice.channel
+    vc = interaction.guild.voice_client
+    if vc and vc.is_connected():
+        return await interaction.response.send_message("Already connected.", ephemeral=True)
+
+    await channel.connect()
+    await interaction.response.send_message("Joined your voice channel.", ephemeral=True)
+
+@bot.tree.command(name="leave", description="Leave the voice channel")
+async def leave(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_connected():
+        await vc.disconnect()
+        await interaction.response.send_message(
+            "Left voice channel.",
+            ephemeral=True
+        )
+    else:
+                                                                                           # Silently acknowledge without sending a message
+        await interaction.response.defer(ephemeral=True)
+
+@bot.tree.command(name="play", description="Play a song by search or link")
+@app_commands.describe(query="Search terms or YouTube URL")
+async def play(interaction: discord.Interaction, query: str):
+    state = get_state(interaction.guild.id)
+    vc = interaction.guild.voice_client
+    if not vc:
+        return await interaction.response.send_message(
+            "Not connected. Use `/join` first.",
+            ephemeral=True
+        )
+
+    # Defer the response as ephemeral so the whole flow stays private
+    await interaction.response.defer(ephemeral=True)
+    try:
+        info = await get_audio_info(query, state.bitrate_mode)
+        embed = discord.Embed(
+            title="Confirm Playback",
+            description=info["title"],
+            color=0x1DB954
+        )
+        if info["thumbnail"]:
+            embed.set_thumbnail(url=info["thumbnail"])
+        embed.set_footer(text="Click to confirm or cancel.")
+
+        # Send the confirmation prompt as ephemeral
+        await interaction.followup.send(
+            embed=embed,
+            view=ConfirmView(info, interaction),
+            ephemeral=True
+        )
+    except Exception as e:
+        logging.error(f"Play command error: {e}")
+        await interaction.followup.send(f"Error: {e}", ephemeral=True)
+
+@bot.tree.command(name="autoqueue", description="Enable auto-queue of similar tracks")
+async def autoqueue(interaction: discord.Interaction):
+    state = get_state(interaction.guild.id)
+    state.autoqueue_enabled = True
+    await interaction.response.send_message("Auto-queue enabled.", ephemeral=True)
+
+@bot.tree.command(name="bitrate", description="Set audio bitrate mode")
+@app_commands.describe(mode="Which bitrate to use")
+@app_commands.choices(mode=[
+    Choice(name="default", value="default"),
+    Choice(name="low", value="low")
+])
+async def bitrate(interaction: discord.Interaction, mode: str):
+    state = get_state(interaction.guild.id)
+    state.bitrate_mode = mode
+    await interaction.response.send_message(f"Bitrate set to `{mode}`.", ephemeral=True)
+
+# ─── Startup & Command Sync ───────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-    await bot.sync_commands()
-    print("Slash commands synced")
+    logging.info(f"Logged in as {bot.user}")
+    await bot.tree.sync()
+    logging.info("Slash commands synced.")
 
-print("Starting Sleppstream...")
 bot.run(TOKEN)
