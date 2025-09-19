@@ -48,6 +48,7 @@ class GuildState:
         self.autoqueue_enabled = False
         self.now_playing_message = None
         self.autoqueue_message = None
+        self.paused = False
 
 guild_states: dict[int, GuildState] = {}
 
@@ -69,71 +70,117 @@ def generate_feed_query(info: dict) -> str:
     genres = " ".join(info.get("genre", []))
     return f"{artist} {genres} related {filtered_title} audio".strip()
 
-async def get_audio_info(query: str, bitrate_mode: str, exclude_url: str = None) -> dict:
-    def extract():
-        fmt = "bestaudio"
-        if bitrate_mode == "low":
-            fmt = "bestaudio[ext=webm][abr<=160]"
-        opts = {
-            "format": fmt,
-            "quiet": True,
-            "default_search": "ytsearch10",  # get top 10 results
-            "noplaylist": True
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(query, download=False)
-            entries = info["entries"] if "entries" in info else [info]
+async def get_audio_info(query: str, bitrate_mode: str = "default", exclude_url: str = None, max_results: int = 1):
+    """
+    Fetch audio info from YouTube using yt_dlp.
+    If max_results > 1, returns a list of dicts instead of a single dict.
+    """
+    import yt_dlp
 
-            # Filter out unwanted results
-            filtered = [
-                e for e in entries
-                if (exclude_url is None or e.get("url") != exclude_url)
-                and 90 <= e.get("duration", 0) <= 900
-            ]
-            if not filtered:
-                raise ValueError("No suitable results found.")
+    # Map bitrate modes to approximate audio specs
+    bitrate_map = {
+        "default": {"kbps": 160},
+        "low": {"kbps": 96}
+    }
+    kbps = bitrate_map.get(bitrate_mode, bitrate_map["default"])["kbps"]
 
-            entry = filtered[0]
-            return {
-                "url": entry["url"],
-                "title": entry["title"],
-                "thumbnail": entry.get("thumbnail"),
-                "artist": entry.get("uploader"),
-                "genre": entry.get("categories", []),
-                "views": entry.get("view_count", 0),
-                "duration": entry.get("duration", 0)
-            }
+    ydl_opts = {
+        "format": f"bestaudio[abr<={kbps}]/bestaudio",
+        "noplaylist": True,
+        "quiet": True,
+        "default_search": "ytsearch",
+        "extract_flat": False,
+    }
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, extract)
+    search_term = f"ytsearch{max_results}:{query}" if max_results > 1 else query
+
+    def _extract():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(search_term, download=False)
+
+    # Run in a thread to avoid blocking
+    info = await asyncio.to_thread(_extract)
+
+    # If we searched for multiple results
+    if max_results > 1 and "entries" in info:
+        results = []
+        for e in info["entries"]:
+            if not e:
+                continue
+            if exclude_url and e.get("url") == exclude_url:
+                continue
+            results.append({
+                "title": e.get("title"),
+                "url": e.get("url"),
+                "thumbnail": e.get("thumbnail"),
+                "duration": e.get("duration"),
+            })
+        return results
+
+    # Single result mode
+    if "entries" in info and info["entries"]:
+        e = info["entries"][0]
+    else:
+        e = info
+
+    return {
+        "title": e.get("title"),
+        "url": e.get("url"),
+        "thumbnail": e.get("thumbnail"),
+        "duration": e.get("duration"),
+    }
 
 # ─── Playback & Auto-Feed ─────────────────────────────────────────────────────
 async def auto_feed(interaction: discord.Interaction, song_info: dict):
     state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
+
     try:
-        rec = await get_audio_info(query, state.bitrate_mode, exclude_url=song_info["url"])
-        rec["search_query"] = query  # store the query for later refresh
-        rec["url_fetched_at"] = time.time()  # store fetch time to skip unnecessary refresh
+        exclude_titles = {s["title"].lower() for s in state.history}
+
+        candidates = await get_audio_info(
+            query,
+            state.bitrate_mode,
+            exclude_url=song_info["url"],
+            max_results=5
+        )
+
+        if isinstance(candidates, dict):
+            candidates = [candidates]
+
+        rec = None
+        for c in candidates:
+            if c["title"].lower() not in exclude_titles:
+                rec = c
+                break
+
+        if not rec:
+            logging.warning(f"[auto_feed] No suitable new track found for query: {query}")
+            return
+
+        rec["search_query"] = query
+        rec["url_fetched_at"] = time.time()
         state.queue.append(rec)
+
+        logging.info(f"[auto_feed] URL fetched for: {rec['title']} at {rec['url_fetched_at']} "
+                     f"(based on {song_info['title']})")
 
         embed = discord.Embed(
             title="Auto-Queued",
             description=f"{rec['title']}\n*(based on {song_info['title']})*",
             color=0x1DB954
         )
-        if rec["thumbnail"]:
+        if rec.get("thumbnail"):
             embed.set_thumbnail(url=rec["thumbnail"])
 
         if state.autoqueue_message:
             await state.autoqueue_message.edit(embed=embed)
         else:
             state.autoqueue_message = await interaction.channel.send(embed=embed)
+
     except Exception as e:
         logging.error(f"Auto-feed error: {e}")
         await interaction.channel.send(f"Feed error: {e}")
-
-import time
 
 async def play_next(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
@@ -156,6 +203,14 @@ async def play_next(interaction: discord.Interaction):
     song = state.queue.pop(0)
     state.history.append(song)
 
+    # ─── Loop Mode Handling ────────────────────────────────────────────────
+    if state.loop_mode == "one":
+        # Put the same song back at the front
+        state.queue.insert(0, song)
+    elif state.loop_mode == "all":
+        # Cycle the song to the end of the queue
+        state.queue.append(song)
+
     # Decide if we need to refresh
     needs_refresh = (
         not song.get("url") or
@@ -174,7 +229,8 @@ async def play_next(interaction: discord.Interaction):
             logging.error(f"Failed to refresh stream URL: {e}")
             return await interaction.channel.send(f"Error refreshing stream for {song['title']}.")
     else:
-        logging.info(f"[play_next] Using cached URL for: {song['title']} (age: {round(time.time() - song['url_fetched_at'], 1)}s)")
+        logging.info(f"[play_next] Using cached URL for: {song['title']} "
+                     f"(age: {round(time.time() - song['url_fetched_at'], 1)}s)")
 
     # Use from_probe with reconnect options for stability
     source = await discord.FFmpegOpusAudio.from_probe(
@@ -188,6 +244,7 @@ async def play_next(interaction: discord.Interaction):
         asyncio.run_coroutine_threadsafe(coro, bot.loop)
 
     vc.play(source, after=_after_play)
+    state.paused = False  # reset pause flag when starting a new track
 
     # Now playing embed
     embed = discord.Embed(title="Now Playing", description=song["title"], color=0x1DB954)
@@ -409,6 +466,72 @@ async def bitrate(interaction: discord.Interaction, mode: str = None):
             msg += " (Your setting is below the channel's max — no quality loss from Discord cap)"
 
     await interaction.response.send_message(msg, ephemeral=True)
+
+# ─── Music Control Commands ────────────────────────────────────────────────
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_playing():
+        return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+    vc.pause()
+    get_state(interaction.guild.id).paused = True
+    await interaction.response.send_message("Paused.", ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Resume playback")
+async def resume(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_paused():
+        return await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+    vc.resume()
+    get_state(interaction.guild.id).paused = False
+    await interaction.response.send_message("▶Resumed.", ephemeral=True)
+
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def stop(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+    state = get_state(interaction.guild.id)
+    state.queue.clear()
+    await interaction.response.send_message("Stopped and cleared the queue.", ephemeral=True)
+
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_playing():
+        return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+    vc.stop()  # triggers play_next()
+    await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
+
+
+@bot.tree.command(name="rewind", description="Replay the current song from the start")
+async def rewind(interaction: discord.Interaction):
+    state = get_state(interaction.guild.id)
+    if not state.history:
+        return await interaction.response.send_message("No song to rewind.", ephemeral=True)
+    current_song = state.history[-1]
+    state.queue.insert(0, current_song)  # put it back at the front
+    vc = interaction.guild.voice_client
+    if vc:
+        vc.stop()
+    await interaction.response.send_message(f"⏮ Rewinding: {current_song['title']}", ephemeral=True)
+
+
+@bot.tree.command(name="loop", description="Set loop mode")
+@app_commands.describe(mode="Loop mode: off, one, or all")
+@app_commands.choices(mode=[
+    Choice(name="off", value="off"),
+    Choice(name="one", value="one"),
+    Choice(name="all", value="all")
+])
+async def loop(interaction: discord.Interaction, mode: str):
+    state = get_state(interaction.guild.id)
+    state.loop_mode = mode
+    await interaction.response.send_message(f"Loop mode set to `{mode}`.", ephemeral=True)
 
 # ─── Startup & Command Sync ───────────────────────────────────────────────────
 @bot.event
