@@ -112,6 +112,7 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
     query = generate_feed_query(song_info)
     try:
         rec = await get_audio_info(query, state.bitrate_mode, exclude_url=song_info["url"])
+        rec["search_query"] = query  # store the query for later refresh
         state.queue.append(rec)
 
         embed = discord.Embed(
@@ -151,7 +152,21 @@ async def play_next(interaction: discord.Interaction):
     song = state.queue.pop(0)
     state.history.append(song)
 
-    source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
+    # Refresh the URL before playback to avoid expiration
+    try:
+        search_term = song.get("search_query", song["title"])
+        refreshed_info = await get_audio_info(search_term, state.bitrate_mode)
+        song["url"] = refreshed_info["url"]
+    except Exception as e:
+        logging.error(f"Failed to refresh stream URL: {e}")
+        return await interaction.channel.send(f"Error refreshing stream for {song['title']}.")
+
+    # Use from_probe with reconnect options for stability
+    source = await discord.FFmpegOpusAudio.from_probe(
+        song["url"],
+        before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+        options='-vn'
+    )
 
     def _after_play(err):
         coro = play_next(interaction)
@@ -161,27 +176,7 @@ async def play_next(interaction: discord.Interaction):
 
     # Now playing embed
     embed = discord.Embed(title="Now Playing", description=song["title"], color=0x1DB954)
-    if song["thumbnail"]:
-        embed.set_thumbnail(url=song["thumbnail"])
-
-    if state.now_playing_message:
-        await state.now_playing_message.edit(embed=embed)
-    else:
-        state.now_playing_message = await interaction.channel.send(embed=embed)
-
-    # Queue the next recommendation if auto‑queue is enabled
-    if state.autoqueue_enabled:
-        await auto_feed(interaction, song)
-
-    def _after_play(err):
-        coro = play_next(interaction)
-        asyncio.run_coroutine_threadsafe(coro, bot.loop)
-
-    vc.play(source, after=_after_play)
-
-    # Now playing embed
-    embed = discord.Embed(title="Now Playing", description=song["title"], color=0x1DB954)
-    if song["thumbnail"]:
+    if song.get("thumbnail"):
         embed.set_thumbnail(url=song["thumbnail"])
 
     if state.now_playing_message:
@@ -288,6 +283,8 @@ async def play(interaction: discord.Interaction, query: str):
     await interaction.response.defer(ephemeral=True)
     try:
         info = await get_audio_info(query, state.bitrate_mode)
+        info["search_query"] = query  # store the original search query for URL refresh
+
         embed = discord.Embed(
             title="Confirm Playback",
             description=info["title"],
@@ -307,11 +304,12 @@ async def play(interaction: discord.Interaction, query: str):
         logging.error(f"Play command error: {e}")
         await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
-@bot.tree.command(name="autoqueue", description="Enable auto-queue of similar tracks")
+@bot.tree.command(name="autoqueue", description="Toggle auto-queue of similar tracks")
 async def autoqueue(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
-    state.autoqueue_enabled = True
-    await interaction.response.send_message("Auto-queue enabled.", ephemeral=True)
+    state.autoqueue_enabled = not state.autoqueue_enabled
+    status = "enabled" if state.autoqueue_enabled else "disabled"
+    await interaction.response.send_message(f"Auto-queue {status}.", ephemeral=True)
 
 @bot.tree.command(name="bitrate", description="Set audio bitrate mode")
 @app_commands.describe(mode="Which bitrate to use")
