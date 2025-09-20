@@ -36,10 +36,32 @@ SPOTIFY_ALBUM_RE = re.compile(
 # app‐only Spotify client
 _sp = spotipy.Spotify(
     client_credentials_manager=SpotifyClientCredentials(
-        client_id=os.getenv("SPOTIPY_CLIENT_ID"),
-        client_secret=os.getenv("SPOTIPY_CLIENT_SECRET")
+        client_id=SPOTIPY_ID,
+        client_secret=SPOTIPY_SECRET
     )
 )
+
+async def one_ephemeral_ack(interaction: discord.Interaction, content: str):
+    """
+    Deletes the previous ephemeral ack in this guild (if any),
+    then defers & sends a new one, returning the Message.
+    """
+    state = get_state(interaction.guild.id)
+
+    # delete last ack if it’s still around
+    if state.last_ack:
+        try:
+            await state.last_ack.delete()
+        except Exception:
+            pass
+
+    # defer ephemerally and send new ack
+    await interaction.response.defer(ephemeral=True)
+    msg = await interaction.followup.send(content, ephemeral=True)
+
+    # store for next time
+    state.last_ack = msg
+    return msg
 
 # ─── Logging Configuration ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -62,10 +84,7 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ─── Constants ────────────────────────────────────────────────────────────────
 FFMPEG_OPTIONS = {"options": "-vn"}
-
-# ─── Per-Guild State Management ───────────────────────────────────────────────
 class GuildState:
     def __init__(self):
         self.queue = []
@@ -77,14 +96,15 @@ class GuildState:
         self.autoqueue_message = None
         self.paused = False
 
+        # add this:
+        self.last_ack: discord.Message | None = None
+
 guild_states: dict[int, GuildState] = {}
 
 def get_state(guild_id: int) -> GuildState:
     if guild_id not in guild_states:
         guild_states[guild_id] = GuildState()
     return guild_states[guild_id]
-
-# ─── Utilities: YT-DLP & Feed Query ─────────────────────────────────────────────
 
 GENRE_MAP = {
     "Don Toliver": "trap",
@@ -574,7 +594,7 @@ async def leave(interaction: discord.Interaction):
 
 async def resolve_spotify_to_search(query: str) -> list[str]:
     """
-    If query is a Spotify track/album/playlist URL, 
+    If query is a Spotify track/album/playlist URL,
     use the Web API to get title+artist and return search terms.
     Otherwise fall back to yt-dlp for everything else.
     """
