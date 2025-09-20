@@ -37,7 +37,7 @@ SPOTIFY_ALBUM_RE = re.compile(
 _sp = spotipy.Spotify(
     client_credentials_manager=SpotifyClientCredentials(
         client_id=SPOTIPY_ID,
-        client_secret=SPOTIPY_SECRET
+        client_secret=SPOTIPY_SECRET,
     )
 )
 
