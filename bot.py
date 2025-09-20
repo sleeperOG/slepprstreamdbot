@@ -60,16 +60,13 @@ def get_state(guild_id: int) -> GuildState:
 
 # ─── Utilities: YT-DLP & Feed Query ─────────────────────────────────────────────
 def generate_feed_query(info: dict) -> str:
-    # Remove common noise words from title
     title = info.get("title", "")
+    artist = info.get("artist", "")
+    # Strip noise words and bracketed tags
+    title = re.sub(r'\[.*?\]|\(.*?\)', '', title)
     noise_words = ["official", "video", "lyrics", "audio", "hd", "hq", "mv"]
-    filtered_title = " ".join(
-        [w for w in title.split() if w.lower() not in noise_words]
-    )
-
-    artist = info.get("artist") or ""
-    genres = " ".join(info.get("genre", []))
-    return f"{artist} {genres} related {filtered_title} audio".strip()
+    filtered_title = " ".join([w for w in title.split() if w.lower() not in noise_words])
+    return f"{artist} {filtered_title} official audio".strip()
 
 async def get_audio_info(query: str, bitrate_mode: str = "default", exclude_url: str = None, max_results: int = 1):
     """
@@ -151,6 +148,25 @@ def is_duplicate(candidate: dict, history: list) -> bool:
             return True
     return False
 
+def normalise_title(title: str) -> str:
+    title = title.lower()
+    title = re.sub(r'\[.*?\]|\(.*?\)', '', title)
+    title = re.sub(r'[^a-z0-9\s]', '', title)
+    title = re.sub(r'\s+', ' ', title)
+    return title.strip()
+
+def is_duplicate(candidate: dict, history: list) -> bool:
+    cand_title = normalise_title(candidate.get("title", ""))
+    cand_dur = candidate.get("duration")
+    for song in history:
+        hist_title = normalise_title(song.get("title", ""))
+        hist_dur = song.get("duration")
+        if cand_title == hist_title:
+            return True
+        if cand_dur and hist_dur and abs(cand_dur - hist_dur) <= 3:
+            return True
+    return False
+
 async def auto_feed(interaction: discord.Interaction, song_info: dict):
     state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
@@ -168,9 +184,11 @@ async def auto_feed(interaction: discord.Interaction, song_info: dict):
 
         rec = None
         for c in candidates:
-            if not is_duplicate(c, state.history):
-                rec = c
-                break
+            if is_duplicate(c, state.history):
+                 logging.info(f"[auto_feed] Skipped duplicate: {c['title']} ({c.get('duration')}s)")
+                 continue
+            rec = c
+            break
 
         if not rec:
             logging.warning(f"[auto_feed] No suitable new track found for query: {query}")
