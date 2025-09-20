@@ -59,14 +59,48 @@ def get_state(guild_id: int) -> GuildState:
     return guild_states[guild_id]
 
 # ─── Utilities: YT-DLP & Feed Query ─────────────────────────────────────────────
+
+GENRE_MAP = {
+    "Don Toliver": "trap",
+    "Young Thug": "trap",
+    "Drake": "hip hop",
+    "Arctic Monkeys": "indie rock",
+    "Metro Boomin": "trap",
+    "SZA": "r&b",
+    "Kendrick Lamar": "conscious rap",
+    "Playboi Carti": "rage",
+    "PinkPantheress": "breakcore",
+    "Aphex Twin": "ambient",
+    # Add more mappings as needed
+}
+
+def infer_genre(info: dict) -> list[str]:
+    artist = info.get("artist", "")
+    for key, genre in GENRE_MAP.items():
+        if key.lower() in artist.lower():
+            return [genre]
+    return []
+
 def generate_feed_query(info: dict) -> str:
     title = info.get("title", "")
     artist = info.get("artist", "")
-    # Strip noise words and bracketed tags
+    genres = info.get("genre", []) or infer_genre(info)
+    genre_str = " ".join(genres)
+
+    import re
     title = re.sub(r'\[.*?\]|\(.*?\)', '', title)
     noise_words = ["official", "video", "lyrics", "audio", "hd", "hq", "mv"]
     filtered_title = " ".join([w for w in title.split() if w.lower() not in noise_words])
-    return f"{artist} {filtered_title} official audio".strip()
+
+    query_parts = [
+        artist,
+        genre_str,
+        "related songs",
+        "new music",
+        "recommended",
+        filtered_title
+    ]
+    return " ".join([q for q in query_parts if q]).strip()
 
 async def get_audio_info(query: str, bitrate_mode: str = "default", exclude_url: str = None, max_results: int = 1):
     """
@@ -170,6 +204,8 @@ def is_duplicate(candidate: dict, history: list) -> bool:
 async def auto_feed(interaction: discord.Interaction, song_info: dict):
     state = get_state(interaction.guild.id)
     query = generate_feed_query(song_info)
+
+    logging.info(f"[auto_feed] Discovery query: {query}")
 
     try:
         candidates = await get_audio_info(
@@ -367,7 +403,7 @@ class PlaybackControls(discord.ui.View):
         vc = interaction.guild.voice_client
         if vc:
             vc.stop()
-        await interaction.response.send_message(f"⏮ Rewinding: {current_song['title']}", ephemeral=True)
+        await interaction.response.send_message(f"Rewinding: {current_song['title']}", ephemeral=True)
 
     @discord.ui.button(emoji="⏯", style=discord.ButtonStyle.grey)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -378,11 +414,11 @@ class PlaybackControls(discord.ui.View):
         if vc.is_playing():
             vc.pause()
             state.paused = True
-            await interaction.response.send_message("⏸ Paused.", ephemeral=True)
+            await interaction.response.send_message("Paused.", ephemeral=True)
         elif vc.is_paused():
             vc.resume()
             state.paused = False
-            await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
+            await interaction.response.send_message("Resumed.", ephemeral=True)
 
     @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.grey)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -390,7 +426,7 @@ class PlaybackControls(discord.ui.View):
         if not vc or not vc.is_playing():
             return await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         vc.stop()
-        await interaction.response.send_message("⏭ Skipped.", ephemeral=True)
+        await interaction.response.send_message("Skipped.", ephemeral=True)
 
     @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -399,14 +435,14 @@ class PlaybackControls(discord.ui.View):
         if vc:
             vc.stop()
         state.queue.clear()
-        await interaction.response.send_message("⏹ Stopped and cleared queue.", ephemeral=True)
+        await interaction.response.send_message("Stopped and cleared queue.", ephemeral=True)
 
     @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.grey)
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(interaction.guild.id)
         modes = ["off", "one", "all"]
         state.loop_mode = modes[(modes.index(state.loop_mode) + 1) % len(modes)]
-        await interaction.response.send_message(f"🔁 Loop mode: `{state.loop_mode}`", ephemeral=True)
+        await interaction.response.send_message(f"Loop mode: `{state.loop_mode}`", ephemeral=True)
 
 # ─── Slash Commands ──────────────────────────────────────────────────────────
 @bot.tree.command(name="status", description="Check bot voice status and queue age")
