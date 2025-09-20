@@ -11,35 +11,6 @@ from discord.ext import commands
 from discord.ui import View, Button
 from dotenv import load_dotenv
 import yt_dlp
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-from yt_dlp.utils import DownloadError
-
-load_dotenv()
-SPOTIPY_ID = os.getenv("SPOTIPY_CLIENT_ID")
-SPOTIPY_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
-TOKEN = os.getenv("DISCORD_TOKEN")
-
-# match open.spotify.com/track/{id}
-SPOTIFY_TRACK_RE = re.compile(
-    r"https://open\.spotify\.com/track/([A-Za-z0-9]+)"
-)
-# match open.spotify.com/playlist/{id}
-SPOTIFY_PLAYLIST_RE = re.compile(
-    r"https://open\.spotify\.com/playlist/([A-Za-z0-9]+)"
-)
-# match open.spotify.com/album/{id}
-SPOTIFY_ALBUM_RE = re.compile(
-    r"https://open\.spotify\.com/album/([A-Za-z0-9]+)"
-)
-
-# app‐only Spotify client
-_sp = spotipy.Spotify(
-    client_credentials_manager=SpotifyClientCredentials(
-        client_id=os.getenv("SPOTIPY_CLIENT_ID"),
-        client_secret=os.getenv("SPOTIPY_CLIENT_SECRET")
-    )
-)
 
 # ─── Logging Configuration ─────────────────────────────────────────────────────
 logging.basicConfig(
@@ -49,6 +20,8 @@ logging.basicConfig(
 )
 
 # ─── Environment & Token ───────────────────────────────────────────────────────
+load_dotenv()
+TOKEN = os.getenv("DISCORD_TOKEN")
 masked = TOKEN[:6] + "…" + TOKEN[-6:] if TOKEN else "None"
 logging.info(f"TOKEN loaded: {masked}")
 if not TOKEN:
@@ -551,67 +524,51 @@ async def join(interaction: discord.Interaction):
     await channel.connect()
     await interaction.response.send_message("Joined your voice channel.", ephemeral=True)
 
-@bot.tree.command(name="leave", description="Disconnect the bot from voice")
+@bot.tree.command(name="leave", description="Leave the voice channel")
 async def leave(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
-    if not vc or not vc.is_connected():
-        # always send *some* response
-        return await interaction.response.send_message(
-            "I’m not in a voice channel right now.",
+    if vc and vc.is_connected():
+        await vc.disconnect()
+        await interaction.response.send_message(
+            "Left voice channel.",
             ephemeral=True
         )
+    else:
+                                                                                           # Silently acknowledge without sending a message
+        await interaction.response.defer(ephemeral=True)
 
-    await vc.disconnect()
-    # optionally clear queue/history here:
-    state = get_state(interaction.guild.id)
-    state.queue.clear()
-    state.history.clear()
-
-    await interaction.response.send_message(
-        "Left the voice channel and cleared the queue.",
-        ephemeral=True
-    )
+SPOTIFY_TRACK_RE = re.compile(r"(?:https?://)?open\.spotify\.com/track/([a-zA-Z0-9]+)")
+SPOTIFY_PLAYLIST_RE = re.compile(r"(?:https?://)?open\.spotify\.com/playlist/([a-zA-Z0-9]+)")
+SPOTIFY_ALBUM_RE = re.compile(r"(?:https?://)?open\.spotify\.com/album/([a-zA-Z0-9]+)")
 
 async def resolve_spotify_to_search(query: str) -> list[str]:
     """
-    If query is a Spotify track/album/playlist URL, 
-    use the Web API to get title+artist and return search terms.
-    Otherwise fall back to yt-dlp for everything else.
+    Takes a Spotify track/playlist/album URL and returns one or more YouTube search terms.
     """
-    # 1) Spotify track
-    if (m := SPOTIFY_TRACK_RE.search(query)):
-        sp_id = m.group(1)
-        data = _sp.track(sp_id)
-        return [f"{data['name']} {data['artists'][0]['name']}"]
+    import yt_dlp
+    ydl_opts = {"quiet": True, "extract_flat": True}
 
-    # 2) Spotify album
-    if (m := SPOTIFY_ALBUM_RE.search(query)):
-        sp_id = m.group(1)
-        items = _sp.album_tracks(sp_id)["items"]
-        return [f"{t['name']} {t['artists'][0]['name']}" for t in items]
-
-    # 3) Spotify playlist
-    if (m := SPOTIFY_PLAYLIST_RE.search(query)):
-        sp_id = m.group(1)
-        items = _sp.playlist_tracks(sp_id)["items"]
-        return [f"{i['track']['name']} {i['track']['artists'][0]['name']}" for i in items]
-
-    # 4) Everything else → yt-dlp  
     def _extract():
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(query, download=False)
 
     info = await asyncio.to_thread(_extract)
 
-    # multi‐video case (YouTube playlist/multi search)
-    if info.get("_type") in ("playlist", "multi_video") and info.get("entries"):
-        return [
-            f"{e['title']} {e.get('uploader','')}".strip()
-            for e in info["entries"] if e
-        ]
+    search_terms = []
+    if info.get("_type") == "playlist" and "entries" in info:
+        for entry in info["entries"]:
+            artist = entry.get("artist") or ""
+            title = entry.get("title") or ""
+            if artist or title:
+                search_terms.append(f"{artist} {title}".strip())
+    else:
+        artist = info.get("artist") or ""
+        title = info.get("title") or ""
+        if artist or title:
+            search_terms.append(f"{artist} {title}".strip())
 
-    # single‐track fallback
-    return [f"{info['title']} {info.get('uploader','')}".strip()]
+    return search_terms
+
 
 @bot.tree.command(name="play", description="Play a song by search, YouTube, or Spotify URL")
 @app_commands.describe(query="Search terms, YouTube URL, or Spotify URL")
@@ -741,7 +698,7 @@ async def clearqueue(interaction: discord.Interaction):
         f"Cleared {pending} song{'s' if pending != 1 else ''} from the queue.",
         ephemeral=True
     )
-
+    
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause(interaction: discord.Interaction):
     vc = interaction.guild.voice_client

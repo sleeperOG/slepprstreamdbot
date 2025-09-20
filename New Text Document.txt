@@ -1,0 +1,140 @@
+PS C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot> python bot.py
+2025-09-20 18:43:55 INFO root | TOKEN loaded: MTQxOD…JdpS3Y
+2025-09-20 18:43:55 INFO     discord.client logging in using static token
+2025-09-20 18:43:55 INFO discord.client | logging in using static token
+2025-09-20 18:43:56 INFO     discord.gateway Shard ID None has connected to Gateway (Session ID: 8195efb53da3179b3e8a91cadd01da5e).
+2025-09-20 18:43:56 INFO discord.gateway | Shard ID None has connected to Gateway (Session ID: 8195efb53da3179b3e8a91cadd01da5e).
+2025-09-20 18:43:58 INFO root | Logged in as Slepprstream#3857
+2025-09-20 18:43:59 INFO root | Slash commands synced.
+2025-09-20 18:44:31 INFO     discord.voice_state Connecting to voice...
+2025-09-20 18:44:31 INFO discord.voice_state | Connecting to voice...
+2025-09-20 18:44:31 INFO     discord.voice_state Starting voice handshake... (connection attempt 1)
+2025-09-20 18:44:31 INFO discord.voice_state | Starting voice handshake... (connection attempt 1)
+2025-09-20 18:44:31 INFO     discord.voice_state Voice handshake complete. Endpoint found: india10031.discord.media:443
+2025-09-20 18:44:31 INFO discord.voice_state | Voice handshake complete. Endpoint found: india10031.discord.media:443
+2025-09-20 18:44:32 INFO     discord.voice_state Voice connection complete.
+2025-09-20 18:44:32 INFO discord.voice_state | Voice connection complete.
+ERROR: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+2025-09-20 18:45:03 ERROR    discord.app_commands.tree Ignoring exception in command 'play'
+Traceback (most recent call last):
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1668, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1803, in __extract_info
+    ie_result = ie.extract(url)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\extractor\common.py", line 762, in extract
+    ie_result = self._real_extract(url)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\extractor\unsupported.py", line 190, in _real_extract
+    raise ExtractorError(
+    ...<3 lines>...
+        'unless you have evidence that the video is not DRM protected', expected=True)
+yt_dlp.utils.ExtractorError: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 633, in play
+    search_terms = await resolve_spotify_to_search(query)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 585, in resolve_spotify_to_search
+    info = await asyncio.to_thread(_extract)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 582, in _extract
+    return ydl.extract_info(query, download=False)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1657, in extract_info
+    return self.__extract_info(url, self.get_info_extractor(key), download, extra_info, process)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1686, in wrapper
+    self.report_error(str(e), e.format_traceback())
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1126, in report_error
+    self.trouble(f'{self._format_err("ERROR:", self.Styles.ERROR)} {message}', *args, **kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1065, in trouble
+    raise DownloadError(message, exc_info)
+yt_dlp.utils.DownloadError: ERROR: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Python313\Lib\site-packages\discord\app_commands\tree.py", line 1297, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'play' raised an exception: DownloadError: ERROR: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+2025-09-20 18:45:03 ERROR discord.app_commands.tree | Ignoring exception in command 'play'
+Traceback (most recent call last):
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1668, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1803, in __extract_info
+    ie_result = ie.extract(url)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\extractor\common.py", line 762, in extract
+    ie_result = self._real_extract(url)
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\extractor\unsupported.py", line 190, in _real_extract
+    raise ExtractorError(
+    ...<3 lines>...
+        'unless you have evidence that the video is not DRM protected', expected=True)
+yt_dlp.utils.ExtractorError: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 859, in _do_call
+    return await self._callback(interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 633, in play
+    search_terms = await resolve_spotify_to_search(query)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 585, in resolve_spotify_to_search
+    info = await asyncio.to_thread(_extract)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "C:\Users\sleep\OneDrive\Desktop\bot\grepobot\slepprstreamdbot\bot.py", line 582, in _extract
+    return ydl.extract_info(query, download=False)
+           ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1657, in extract_info
+    return self.__extract_info(url, self.get_info_extractor(key), download, extra_info, process)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1686, in wrapper
+    self.report_error(str(e), e.format_traceback())
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1126, in report_error
+    self.trouble(f'{self._format_err("ERROR:", self.Styles.ERROR)} {message}', *args, **kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\sleep\AppData\Roaming\Python\Python313\site-packages\yt_dlp\YoutubeDL.py", line 1065, in trouble
+    raise DownloadError(message, exc_info)
+yt_dlp.utils.DownloadError: ERROR: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Python313\Lib\site-packages\discord\app_commands\tree.py", line 1297, in _call
+    await command._invoke_with_namespace(interaction, namespace)
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 884, in _invoke_with_namespace
+    return await self._do_call(interaction, transformed_values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\site-packages\discord\app_commands\commands.py", line 877, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'play' raised an exception: DownloadError: ERROR: [DRM] The requested site is known to use DRM protection. It will NOT be supported.
+       Please DO NOT open an issue, unless you have evidence that the video is not DRM protected
